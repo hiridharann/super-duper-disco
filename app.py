@@ -7,53 +7,55 @@ from supabase import create_client, Client
 st.set_page_config(page_title="Qwen Chat", page_icon="🚄")
 
 # --- 1. Database & Auth Setup ---
-# Load secrets from Streamlit Dashboard
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    # If testing locally, use http://localhost:8501
-    # On Streamlit Cloud, use your actual app URL (e.g. https://my-app.streamlit.app)
-    REDIRECT_URL = st.secrets["REDIRECT_URL"] 
+    REDIRECT_URL = st.secrets["REDIRECT_URL"]
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    st.error("Secrets not found! Please add SUPABASE_URL, SUPABASE_KEY, and REDIRECT_URL to Streamlit secrets.")
+    st.error("Secrets not found! Please check your Streamlit secrets.")
     st.stop()
 
 # --- 2. Auth Logic ---
 if "session" not in st.session_state:
     st.session_state.session = None
 
-# Handle the return from Google (it adds ?code=... to the URL)
+# Handle the return from Google (URL contains ?code=...)
 if "code" in st.query_params:
     try:
         code = st.query_params["code"]
-        # Exchange code for a secure session
+        # Exchange code for session
         session = supabase.auth.exchange_code_for_session({"auth_code": code})
         st.session_state.session = session
-        st.query_params.clear() # Clean the URL
+        st.query_params.clear()  # Clean URL
         st.rerun()
     except Exception as e:
         st.error(f"Login failed: {e}")
 
-# Check if user is logged in
 user = st.session_state.session.user if st.session_state.session else None
 
-# --- 3. Login Screen (If not logged in) ---
+# --- 3. Login Screen (FIXED SECTION) ---
 if not user:
     st.title("🚄 Qwen 2.5 Login")
     st.write("Please sign in to access the AI.")
     
     try:
-        # Get the Google Login URL
-        res = supabase.auth.get_sign_in_url({
+        # --- THE FIX IS HERE ---
+        # We use 'sign_in_with_oauth' instead of 'get_sign_in_url'
+        data = supabase.auth.sign_in_with_oauth({
             "provider": "google",
-            "redirect_to": REDIRECT_URL
+            "options": {
+                "redirect_to": REDIRECT_URL
+            }
         })
-        st.link_button("Sign in with Google", res['url'], type="primary")
+        
+        # The new function returns an object, we need the .url property
+        st.link_button("Sign in with Google", data.url, type="primary")
+        
     except Exception as e:
         st.error(f"Auth Config Error: {e}")
     
-    st.stop() # Stop here! Don't load the model yet.
+    st.stop()
 
 # --- 4. Main App (Only runs if Logged In) ---
 st.sidebar.success(f"Logged in as: {user.email}")
@@ -94,16 +96,15 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask Qwen something..."):
-    # 1. Show User Message
+    # User Message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2. Generate Response
+    # Generate Response
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
         
-        # Prepare Qwen Template
         chat_history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
         text = tokenizer.apply_chat_template(chat_history, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer([text], return_tensors="pt").to(model.device)
@@ -123,7 +124,7 @@ if prompt := st.chat_input("Ask Qwen something..."):
     
     st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-    # 3. Save to Supabase
+    # Save to Supabase
     try:
         supabase.table("chat_logs").insert({
             "user_id": user.id,
@@ -133,4 +134,5 @@ if prompt := st.chat_input("Ask Qwen something..."):
             "model": "Qwen-0.5B"
         }).execute()
     except Exception as e:
-        st.error(f"Failed to save to DB: {e}")
+        # Don't crash if DB fails, just print error
+        print(f"Failed to save to DB: {e}")
